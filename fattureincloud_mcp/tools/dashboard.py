@@ -23,6 +23,7 @@ QUOTA_WARNING = {"hourly": 100, "monthly": 2000}  # remaining requests below whi
 SAFETY_CAP = 20000       # documents per query; reaching it means totals may be partial
 AGING_BUCKETS = (("1_30", 30), ("31_90", 90), ("91_365", 365), ("oltre_365", None))
 NO_REGISTRY_PREFIX = "nome:"
+SUBJECT_CHARS = 80
 
 _cache = {}       # full results, per parameter combination
 _doc_cache = {}   # fetched documents, shared by every presentation option (amounts, proformas, top_n)
@@ -297,6 +298,25 @@ def _compute(year, as_of, open_from, top_n, include_pf, amounts):
     ndc_aperte_totale = sum((p.get("amount", 0) or 0) * factor(d) for d in ndc_aperte
                             for p in d.get("payments_list") or [] if payment_status_name(p) == "not_paid")
 
+    # Matured proformas, one row each, always listed (also when they don't count in exposure).
+    pf_rows = []
+    for d in proformas:
+        f = factor(d)
+        open_rates = [p for p in d.get("payments_list") or [] if payment_status_name(p) == "not_paid"]
+        if not open_rates:
+            continue
+        dues = sorted(str(p["due_date"])[:10] for p in open_rates if p.get("due_date"))
+        overdue = sum((p.get("amount", 0) or 0) * f for p in open_rates
+                      if p.get("due_date") and Date.fromisoformat(str(p["due_date"])[:10]) < as_of_date)
+        subject = ((d.get("visible_subject") or d.get("subject") or "").strip())
+        if len(subject) > SUBJECT_CHARS:
+            subject = subject[:SUBJECT_CHARS - 1].rstrip() + "…"
+        first_due = dues[0] if dues else None
+        pf_rows.append([d.get("id"), d.get("number"), str(d.get("date", "")), key_of(d, "proforma"),
+                        r2(sum((p.get("amount", 0) or 0) * f for p in open_rates)), r2(overdue), first_due,
+                        max(0, (as_of_date - Date.fromisoformat(first_due)).days) if first_due else 0, subject])
+    pf_rows.sort(key=lambda r: (r[3], r[2]))
+
     # --- Assemble ------------------------------------------------------------------------
     by_revenue = []
     for key, v in revenue.items():
@@ -399,6 +419,11 @@ def _compute(year, as_of, open_from, top_n, include_pf, amounts):
         "by_revenue": by_revenue,
         "by_exposure": by_exposure,
         "top": top,
+        "proforma_maturate": {
+            "columns": ["id", "numero", "data", "client_id", "importo", "scaduto", "prima_scadenza",
+                        "giorni_ritardo", "oggetto"],
+            "rows": pf_rows,
+        },
         "exposure_by_year": {
             "anni": list(range(first_year, as_of_date.year + 1)),
             "columns": columns,
@@ -423,7 +448,8 @@ def get_situazione_crediti(
 ) -> dict:
     """Situazione crediti clienti in una sola chiamata, per dashboard: totali dell'anno, classifica clienti
     per fatturato (by_revenue), per esposizione (by_exposure), top N, esposizione per anno di emissione
-    (exposure_by_year, colonne + righe). Raggruppato per client_id; righe con senza_anagrafica=true sono
+    (exposure_by_year, colonne + righe), elenco delle proforma maturate non pagate (proforma_maturate,
+    colonne + righe, sempre presente; importo = parte non pagata). Raggruppato per client_id; righe con senza_anagrafica=true sono
     documenti non collegati a un cliente, elencati in warnings. Importi IVA inclusa (amounts=gross) o
     imponibili (amounts=net). Esposizione = rate not_paid di fatture aperte di qualsiasi anno, più le
     proforma con data <= as_of se include_proforma_maturate (default true); le rate stornate non contano.
