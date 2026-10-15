@@ -7,17 +7,10 @@ from pydantic import Field
 
 from .. import fic
 from ..app import ann, tool
-from ..listing import DEFAULT_MAX_RESULTS, build_date_clauses, fetch_all_pages, today_str
+from ..listing import DEFAULT_MAX_RESULTS, build_date_clauses, fetch_all_pages, received_gross, today_str
 from ..lookups import fetch_cost_centers
 
 LIST_DESCRIPTION_CHARS = 80
-
-
-def received_gross(d):
-    """FIC leaves amount_gross null on received documents: derive it from net + VAT."""
-    if d.get("amount_gross") is not None:
-        return d["amount_gross"]
-    return round((d.get("amount_net") or 0) + (d.get("amount_vat") or 0), 2)
 
 
 @tool(annotations=ann(read_only=True, idempotent=True))

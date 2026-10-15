@@ -8,8 +8,8 @@ from pydantic import Field
 from .. import fic
 from ..app import ann, tool
 from ..listing import (ISSUED_LIST_FIELDS, SITUATION_MAX_PER_TYPE, build_date_clauses, fetch_all_pages,
-                       get_total_from_doc, issued_doc_row, payment_status_name, q_escape, resolve_client,
-                       today_str)
+                       doc_taxable, get_total_from_doc, issued_doc_row, payment_status_name, q_escape,
+                       received_gross, resolve_client, today_str)
 
 
 @tool(annotations=ann(read_only=True, idempotent=True))
@@ -17,18 +17,23 @@ def get_situation(
     year: Annotated[int | None, Field(description="Anno (default: corrente)")] = None,
     client_name: Annotated[str | None, Field(description="Filtro per nome cliente (opzionale, ricerca parziale)")] = None,
 ) -> dict:
-    """Dashboard anno: fatturato netto (fatture - NDC), incassato, da incassare, costi, margine.
-    Supporta filtro per cliente."""
+    """Dashboard anno. Importi IVA inclusa: fatturato_lordo, note_credito, fatturato_netto (fatture meno
+    NDC), incassato, da_incassare, scadute, prossime_scadenze. Importi imponibili (IVA esclusa):
+    imponibile_fatturato (fatture meno NDC), costi_imponibile e margine_lordo = imponibile_fatturato -
+    costi_imponibile; costi_iva_inclusa solo come riferimento. Con filtro cliente costi e margine non
+    sono calcolati."""
     year = year or datetime.now().year
     client_filter = (client_name or "").strip()
     year_q = " and ".join(build_date_clauses(year=year))
     q = year_q + (f" and entity.name like '%{q_escape(client_filter)}%'" if client_filter else "")
 
     # One year is bounded, so fetch every page: partial totals would be wrong totals.
+    # items_list is needed for the taxable amounts (see doc_taxable).
+    fields = ISSUED_LIST_FIELDS + ",items_list"
     emesse, _ = fetch_all_pages(fic.issued_api.list_issued_documents, max_results=None,
-                                type="invoice", q=q, fields=ISSUED_LIST_FIELDS)
+                                type="invoice", q=q, fields=fields)
     ndc_docs, _ = fetch_all_pages(fic.issued_api.list_issued_documents, max_results=None,
-                                  type="credit_note", q=q, fields=ISSUED_LIST_FIELDS)
+                                  type="credit_note", q=q, fields=fields)
 
     totale_fatturato = totale_incassato = totale_da_incassare = 0
     fatture_non_pagate = []
@@ -48,12 +53,14 @@ def get_situation(
                 })
     totale_ndc = sum(abs(get_total_from_doc(d)) for d in ndc_docs)
     fatturato_netto = totale_fatturato - totale_ndc
+    imponibile = sum(doc_taxable(d) for d in emesse) - sum(abs(doc_taxable(d)) for d in ndc_docs)
 
-    totale_costi = 0
+    costi = None
     if not client_filter:
         ricevute, _ = fetch_all_pages(fic.received_api.list_received_documents, max_results=None,
                                       type="expense", q=year_q, fieldset="detailed")
-        totale_costi = sum(d.get('amount_gross') or d.get('amount_net') or 0 for d in ricevute)
+        costi = {"imponibile": sum(d.get('amount_net') or 0 for d in ricevute),
+                 "iva_inclusa": sum(received_gross(d) for d in ricevute)}
 
     fatture_non_pagate.sort(key=lambda x: x.get('due_date', ''))
     today = today_str()
@@ -67,8 +74,10 @@ def get_situation(
         "fatturato_netto": round(fatturato_netto, 2),
         "incassato": round(totale_incassato, 2),
         "da_incassare": round(totale_da_incassare, 2),
-        "costi_totali": round(totale_costi, 2) if not client_filter else "N/A (filtro cliente attivo)",
-        "margine_lordo": round(fatturato_netto - totale_costi, 2) if not client_filter else "N/A",
+        "imponibile_fatturato": round(imponibile, 2),
+        "costi_imponibile": round(costi["imponibile"], 2) if costi else "N/A (filtro cliente attivo)",
+        "costi_iva_inclusa": round(costi["iva_inclusa"], 2) if costi else "N/A (filtro cliente attivo)",
+        "margine_lordo": round(imponibile - costi["imponibile"], 2) if costi else "N/A",
         "scadute": {
             "numero": len(scadute),
             "totale": round(sum(f["amount"] for f in scadute), 2),

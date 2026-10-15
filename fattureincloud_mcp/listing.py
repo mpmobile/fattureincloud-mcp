@@ -32,6 +32,22 @@ def get_total_from_doc(d):
     return sum((i.get('qty', 0) * i.get('gross_price', 0)) for i in items)
 
 
+def doc_taxable(d):
+    """Taxable (VAT-excluded) amount of an issued document, from its item lines.
+
+    FIC returns no amount_net / amount_gross on issued documents, in lists or in the
+    detail; computed the same way, the gross from the lines matches the payments total."""
+    return sum((i.get("qty") or 0) * (i.get("net_price") or 0) * (1 - (i.get("discount") or 0) / 100)
+               for i in d.get("items_list") or [])
+
+
+def received_gross(d):
+    """FIC leaves amount_gross null on received documents: derive it from net + VAT."""
+    if d.get("amount_gross") is not None:
+        return d["amount_gross"]
+    return round((d.get("amount_net") or 0) + (d.get("amount_vat") or 0), 2)
+
+
 def q_escape(value):
     """Escape a string literal for the FIC `q` filter (SQL-style quote doubling)."""
     return str(value).replace("'", "''")
