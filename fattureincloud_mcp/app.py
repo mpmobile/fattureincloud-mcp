@@ -37,4 +37,4 @@ def main():
     mcp.run()
 
 
-from .tools import clients, company, e_invoice, issued_documents, received, reports  # noqa: E402,F401
+from .tools import clients, company, dashboard, e_invoice, issued_documents, received, reports  # noqa: E402,F401

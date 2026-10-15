@@ -53,7 +53,7 @@ def q_escape(value):
     return str(value).replace("'", "''")
 
 
-def _parse_date(value, field):
+def parse_date(value, field):
     try:
         return datetime.strptime(value, "%Y-%m-%d").strftime("%Y-%m-%d")
     except (TypeError, ValueError):
@@ -63,13 +63,13 @@ def _parse_date(value, field):
 def build_date_clauses(date=None, date_from=None, date_to=None, year=None, month=None):
     """Date filter, by precedence: date > date_from/date_to > year/month."""
     if date:
-        return [f"date = '{_parse_date(date, 'date')}'"]
+        return [f"date = '{parse_date(date, 'date')}'"]
     if date_from or date_to:
         clauses = []
         if date_from:
-            clauses.append(f"date >= '{_parse_date(date_from, 'date_from')}'")
+            clauses.append(f"date >= '{parse_date(date_from, 'date_from')}'")
         if date_to:
-            clauses.append(f"date <= '{_parse_date(date_to, 'date_to')}'")
+            clauses.append(f"date <= '{parse_date(date_to, 'date_to')}'")
         return clauses
     if year and month:
         last_day = calendar.monthrange(year, month)[1]

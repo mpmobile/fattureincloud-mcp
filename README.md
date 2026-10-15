@@ -13,7 +13,7 @@ MCP server that connects Claude (Desktop, Code, or any MCP client) to **FattureI
 
 > ⚠️ **Unofficial integration.** Not affiliated with, endorsed by, or sponsored by TeamSystem S.p.A., owner of the FattureInCloud trademark. The trademark is used here for descriptive purposes only.
 
-## Features (24 tools)
+## Features (25 tools)
 
 | Tool | Description |
 |------|-------------|
@@ -40,6 +40,7 @@ MCP server that connects Claude (Desktop, Code, or any MCP client) to **FattureI
 | `list_cost_centers` | List configured cost / revenue centers |
 | `get_situation` | Yearly dashboard: net revenue, collected, outstanding, costs, margin |
 | `get_client_situation` | Single-client situation: invoiced, credit notes, collected, outstanding, overdue, open invoices, proformas |
+| `get_situazione_crediti` | Receivables dashboard data: yearly totals, clients ranked by revenue and by exposure, aging, top N |
 | `check_numeration` | Verify invoice numbering continuity |
 
 > Marking payments as "paid" is intentionally not exposed: the FattureInCloud API requires a payment account that cannot be reliably retrieved through the SDK. Use the FattureInCloud web panel for that operation.
