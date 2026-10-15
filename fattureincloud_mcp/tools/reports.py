@@ -56,6 +56,9 @@ def get_situation(
         totale_costi = sum(d.get('amount_gross') or d.get('amount_net') or 0 for d in ricevute)
 
     fatture_non_pagate.sort(key=lambda x: x.get('due_date', ''))
+    today = today_str()
+    scadute = [f for f in fatture_non_pagate if f["due_date"] < today]
+    in_scadenza = [f for f in fatture_non_pagate if f["due_date"] >= today]
     return {
         "anno": year,
         "filtro_cliente": client_filter or None,
@@ -66,7 +69,12 @@ def get_situation(
         "da_incassare": round(totale_da_incassare, 2),
         "costi_totali": round(totale_costi, 2) if not client_filter else "N/A (filtro cliente attivo)",
         "margine_lordo": round(fatturato_netto - totale_costi, 2) if not client_filter else "N/A",
-        "prossime_scadenze": fatture_non_pagate[:10]
+        "scadute": {
+            "numero": len(scadute),
+            "totale": round(sum(f["amount"] for f in scadute), 2),
+            "piu_vecchie": scadute[:10],
+        },
+        "prossime_scadenze": in_scadenza[:10],
     }
 
 
@@ -151,7 +159,9 @@ def get_client_situation(
         counts[doc_type] = total
         truncated = truncated or len(docs) < total
 
-    all_dates = [str(d.get("date")) for docs in docs_by_type.values() for d in docs if d.get("date")]
+    # Future-dated proformas are scheduled billing, reported in proforma_future: not "issued" yet.
+    all_dates = [str(d.get("date")) for docs in docs_by_type.values() for d in docs
+                 if d.get("date") and str(d.get("date")) <= today]
     periodo = {k: v for k, v in (("date_from", date_from), ("date_to", date_to), ("year", year)) if v}
     result = {
         "cliente": client,
@@ -176,7 +186,8 @@ def get_client_situation(
     ndc = sum(abs(get_total_from_doc(d)) for d in credit_notes)
     if "credit_note" in include:
         result["note_credito"] = round(ndc, 2)
-        ndc_aperte = [d.get("number") for d in credit_notes if d.get("next_due_date")]
+        ndc_aperte = [{"id": d.get("id"), "number": d.get("number"), "date": str(d.get("date", "")),
+                       "total": get_total_from_doc(d)} for d in credit_notes if d.get("next_due_date")]
         if ndc_aperte:
             result["note_credito_non_saldate"] = ndc_aperte
     if "invoice" in include and "credit_note" in include:

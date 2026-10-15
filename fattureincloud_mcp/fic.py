@@ -13,6 +13,7 @@ from fattureincloud_python_sdk.api.info_api import InfoApi
 from fattureincloud_python_sdk.api.issued_documents_api import IssuedDocumentsApi
 from fattureincloud_python_sdk.api.issued_e_invoices_api import IssuedEInvoicesApi
 from fattureincloud_python_sdk.api.received_documents_api import ReceivedDocumentsApi
+from fattureincloud_python_sdk.api.user_api import UserApi
 
 ACCESS_TOKEN = os.getenv("FIC_ACCESS_TOKEN", "")
 COMPANY_ID = int(os.getenv("FIC_COMPANY_ID", "0"))
@@ -28,3 +29,4 @@ received_api = ReceivedDocumentsApi(api_client)
 clients_api = ClientsApi(api_client)
 companies_api = CompaniesApi(api_client)
 info_api = InfoApi(api_client)
+user_api = UserApi(api_client)

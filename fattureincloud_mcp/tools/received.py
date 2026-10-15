@@ -10,6 +10,15 @@ from ..app import ann, tool
 from ..listing import DEFAULT_MAX_RESULTS, build_date_clauses, fetch_all_pages, today_str
 from ..lookups import fetch_cost_centers
 
+LIST_DESCRIPTION_CHARS = 80
+
+
+def received_gross(d):
+    """FIC leaves amount_gross null on received documents: derive it from net + VAT."""
+    if d.get("amount_gross") is not None:
+        return d["amount_gross"]
+    return round((d.get("amount_net") or 0) + (d.get("amount_vat") or 0), 2)
+
 
 @tool(annotations=ann(read_only=True, idempotent=True))
 def list_received_documents(
@@ -37,10 +46,12 @@ def list_received_documents(
         desc = d.get('description', '') or ''
         if query and query.lower() not in f"{supplier_name} {desc}".lower():
             continue
+        if len(desc) > LIST_DESCRIPTION_CHARS:
+            desc = desc[:LIST_DESCRIPTION_CHARS].rstrip() + "…"  # full text in get_received_document
         entry = {
-            "id": d.get("id"), "number": d.get("number"),
+            "id": d.get("id"), "number": d.get("invoice_number"),
             "date": str(d.get("date", "")), "supplier": supplier_name,
-            "description": desc[:80], "total": d.get('amount_gross') or d.get('amount_net') or 0
+            "description": desc, "total": received_gross(d)
         }
         if d.get("rc_center"):
             entry["cost_center"] = d["rc_center"]
@@ -81,7 +92,7 @@ def get_received_document(
         "category": d.get("category"),
         "amount_net": d.get("amount_net"),
         "amount_vat": d.get("amount_vat"),
-        "amount_gross": d.get("amount_gross"),
+        "amount_gross": received_gross(d),
         "items": items,
         "payments": payments,
     }
