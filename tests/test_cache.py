@@ -4,7 +4,7 @@ from datetime import timedelta
 
 import pytest
 
-import cache
+from fattureincloud_mcp import cache
 
 
 @pytest.fixture

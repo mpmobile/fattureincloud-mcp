@@ -6,27 +6,9 @@ Pre-cache baseline: 2 API calls per build_entity_from_client(client_id).
 Post-cache target: 1 API call. Test fails if > 1.
 """
 
-import importlib
-import sys
 
 import pytest
 from unittest.mock import MagicMock, patch
-
-
-@pytest.fixture
-def server_module(tmp_path, monkeypatch):
-    monkeypatch.setenv("FIC_CACHE_DIR", str(tmp_path))
-    monkeypatch.delenv("FIC_CACHE_DISABLED", raising=False)
-    monkeypatch.setenv("FIC_ACCESS_TOKEN", "test_token")
-    monkeypatch.setenv("FIC_COMPANY_ID", "100")
-    monkeypatch.setenv("FIC_SENDER_EMAIL", "test@example.invalid")
-
-    for mod in ("server", "cache"):
-        if mod in sys.modules:
-            del sys.modules[mod]
-
-    server = importlib.import_module("server")
-    yield server
 
 
 def _mock_client_response(client_payload):

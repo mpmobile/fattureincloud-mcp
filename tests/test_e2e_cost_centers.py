@@ -15,30 +15,20 @@ No real FIC API calls. All SDK methods are mocked. Safe to run in CI.
 """
 
 import asyncio
-import importlib
 import json
-import sys
 
 import pytest
 from unittest.mock import MagicMock, patch
+
+from tests.conftest import load_server
 
 
 KNOWN_CENTERS = ["Project Alpha", "Project Beta"]
 
 
 @pytest.fixture
-def server_module(tmp_path, monkeypatch):
-    monkeypatch.setenv("FIC_CACHE_DIR", str(tmp_path))
-    monkeypatch.delenv("FIC_CACHE_DISABLED", raising=False)
-    monkeypatch.setenv("FIC_ACCESS_TOKEN", "test_token")
-    monkeypatch.setenv("FIC_COMPANY_ID", "100")
-    monkeypatch.setenv("FIC_SENDER_EMAIL", "test@example.invalid")
-
-    for mod in ("server", "cache"):
-        if mod in sys.modules:
-            del sys.modules[mod]
-
-    server = importlib.import_module("server")
+def server_module(fic_env):
+    server = load_server()
 
     list_cc_response = MagicMock()
     list_cc_response.data = list(KNOWN_CENTERS)
@@ -137,7 +127,7 @@ def test_list_cost_centers_dedups_overlap(server_module, monkeypatch):
     rev = MagicMock()
     rev.data = ["Shared", "OnlyRevenue"]
     # invalidate caches from the previous fixture call
-    import cache as cache_mod
+    from fattureincloud_mcp import cache as cache_mod
     cache_mod.invalidate_all(100)
 
     with patch.object(server.info_api, "list_cost_centers", return_value=cost), \

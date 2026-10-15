@@ -49,7 +49,7 @@ Issues = "https://github.com/aringad/fattureincloud-mcp/issues"
 Author = "https://media-form.it"
 
 [project.scripts]
-fattureincloud-mcp = "server:main"
+fattureincloud-mcp = "fattureincloud_mcp.app:main"
 
 [tool.setuptools]
-py-modules = ["server", "cache"]
+packages = ["fattureincloud_mcp", "fattureincloud_mcp.tools"]
