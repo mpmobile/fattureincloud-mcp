@@ -82,6 +82,134 @@ Then add to your MCP client configuration (for Claude Desktop, `~/Library/Applic
 
 Restart your MCP client after editing the config.
 
+### Option 3 — From the source code, without git (Windows / macOS)
+
+Use this if you want the latest code from this repository and don't use git. You need Python 3.10 or newer, Claude Desktop, and your FattureInCloud credentials ([how to get them](#getting-the-fattureincloud-credentials)).
+
+#### Windows
+
+**1. Check whether Python is installed.** Open the Start menu, type `PowerShell` and open it, then run:
+
+```powershell
+py --version
+```
+
+If it prints `Python 3.10` or higher (e.g. `Python 3.12.7`), go to step 3. If it says the command is not recognized, or prints a version lower than 3.10, install Python (step 2). Note: typing `python` on a PC without Python may open the Microsoft Store instead of printing a version; that also means Python is not installed.
+
+**2. Install Python.** Go to [python.org/downloads](https://www.python.org/downloads/), download the latest Windows installer and run it. On the first screen, **tick "Add python.exe to PATH"**, then click *Install Now*. When it finishes, close PowerShell, open a new one and run `py --version` again to confirm.
+
+**3. Download the server.** On this repository's GitHub page click the green **Code** button → **Download ZIP**. Extract the ZIP and move the extracted folder to `C:\fattureincloud-mcp` (rename it if it is called `fattureincloud-mcp-main`). The folder must directly contain `server.py` and `requirements.txt`.
+
+**4. Install the dependencies.** In PowerShell:
+
+```powershell
+cd C:\fattureincloud-mcp
+py -m venv .venv
+.venv\Scripts\python -m pip install -r requirements.txt
+```
+
+This creates a private Python environment inside the folder (`.venv`), so nothing is installed system-wide.
+
+**5. Configure Claude Desktop.** In Claude Desktop open **Settings → Developer → Edit Config**: this opens the folder with `claude_desktop_config.json`. Open that file with Notepad and add the server (if the file already has an `mcpServers` section, add only the `"fattureincloud": {...}` block inside it):
+
+```json
+{
+  "mcpServers": {
+    "fattureincloud": {
+      "command": "C:\\fattureincloud-mcp\\.venv\\Scripts\\python.exe",
+      "args": ["C:\\fattureincloud-mcp\\server.py"],
+      "env": {
+        "FIC_ACCESS_TOKEN": "a/xxxxx.yyyyy.zzzzz",
+        "FIC_COMPANY_ID": "123456",
+        "FIC_SENDER_EMAIL": "billing@yourcompany.com"
+      }
+    }
+  }
+}
+```
+
+Paths in this file need **double backslashes** (`\\`). Replace the three values in `env` with your credentials.
+
+**6. Restart Claude Desktop.** Closing the window is not enough: right-click the Claude icon in the system tray (bottom right, near the clock) → **Quit**, then reopen it. Go on with [Check that it works](#check-that-it-works).
+
+#### macOS
+
+**1. Check whether Python is installed.** Open **Terminal** (Applications → Utilities → Terminal) and run:
+
+```bash
+python3 --version
+```
+
+If it prints `Python 3.10` or higher, go to step 3. If it prints `Python 3.9.x` or lower, or a window asks you to install the "command line developer tools", install Python (step 2): the Python bundled with Apple's developer tools is 3.9, too old for this server.
+
+**2. Install Python.** Go to [python.org/downloads](https://www.python.org/downloads/), download the latest macOS installer (`.pkg`) and run it. When it finishes, close Terminal, open a new window and run `python3 --version` again to confirm.
+
+**3. Download the server.** On this repository's GitHub page click the green **Code** button → **Download ZIP**. Safari extracts it automatically into Downloads. Move the extracted folder into your home folder and rename it `fattureincloud-mcp`, so its path is `/Users/<your-username>/fattureincloud-mcp`. The folder must directly contain `server.py` and `requirements.txt`.
+
+**4. Install the dependencies.** In Terminal:
+
+```bash
+cd ~/fattureincloud-mcp
+python3 -m venv .venv
+.venv/bin/python -m pip install -r requirements.txt
+pwd
+```
+
+The last command prints the folder's full path (e.g. `/Users/mario/fattureincloud-mcp`): you need it in the next step.
+
+**5. Configure Claude Desktop.** In Claude Desktop open **Settings → Developer → Edit Config**: this shows `claude_desktop_config.json` in Finder. Open it with TextEdit and add the server (if the file already has an `mcpServers` section, add only the `"fattureincloud": {...}` block inside it), using the path printed by `pwd`:
+
+```json
+{
+  "mcpServers": {
+    "fattureincloud": {
+      "command": "/Users/mario/fattureincloud-mcp/.venv/bin/python",
+      "args": ["/Users/mario/fattureincloud-mcp/server.py"],
+      "env": {
+        "FIC_ACCESS_TOKEN": "a/xxxxx.yyyyy.zzzzz",
+        "FIC_COMPANY_ID": "123456",
+        "FIC_SENDER_EMAIL": "billing@yourcompany.com"
+      }
+    }
+  }
+}
+```
+
+Replace the three values in `env` with your credentials. If TextEdit changes the straight quotes `"` into curly ones, disable *Edit → Substitutions → Smart Quotes*, or the file won't be valid.
+
+**6. Restart Claude Desktop.** Quit it completely with **Cmd+Q** (closing the window is not enough) and reopen it.
+
+#### Check that it works
+
+In Claude Desktop, **Settings → Developer** should list `fattureincloud` as running. Then ask Claude: *"Show me the info of the company connected to FattureInCloud"*. If it answers with your company name, the server and the credentials work.
+
+If the server shows an error instead: check that the two paths in the config point to existing files, that the JSON is valid (commas, brackets, quotes), and that the token and company ID are correct. A `403 Forbidden` error means the token lacks a permission (see below).
+
+To update to a newer version later, download the ZIP again, replace the folder's files (keep `.venv`) and re-run the `pip install -r requirements.txt` command.
+
+## Getting the FattureInCloud credentials
+
+The server needs an **access token** and your **company ID**. The FattureInCloud APIs are included in every plan, also in the free trial; sending e-invoices to SDI through the API requires a paid plan.
+
+FattureInCloud issues personal tokens through a private "app" that you create in your own account. It takes a few minutes and is done once:
+
+**1. Create a private app.** Log into [FattureInCloud](https://secure.fattureincloud.it/), go to **Impostazioni → Sviluppatore** and click **Nuova app**. Give it a name (e.g. `Claude MCP`) and a short description. Keep the visibility **private**, and in **"E-mail degli utenti che possono utilizzare l'applicazione"** enter the email of your FattureInCloud account: without it, the API answers with a 403 error. Save, and note the app's **Client ID** shown on its page.
+
+**2. Generate the token.** Go to **Impostazioni → Applicazioni collegate** and click **Collega una nuova applicazione**. Enter the Client ID from step 1, select the company to connect and the permissions to grant (below), then copy the **access token** (it starts with `a/`). This is your `FIC_ACCESS_TOKEN`. The token does not expire; you can revoke it from the same page, and change its permissions later with **Gestisci → Modifica** without generating a new one.
+
+**Permissions to grant.** Grant only what you'll use; a missing permission shows up as a `403 Forbidden` error on the related tool.
+
+| To use… | Grant |
+|---|---|
+| clients (`list_clients`, `create_client`, `update_client`) | `entity.clients` |
+| invoices, credit notes, proformas, quotes | `issued_documents.invoices`, `issued_documents.credit_notes`, `issued_documents.proformas`, `issued_documents.quotes` |
+| supplier documents (`list_received_documents`, `create_received_document`, …) | `received_documents` |
+| cost / revenue centers, company settings | `settings` |
+
+Each permission can be granted read-only or with full access (read and write). For a read-only setup (reports, lists, situations) read-only is enough; creating, editing, sending or deleting documents needs full access on the related permission.
+
+**3. Find your company ID.** It is the number in the browser's address bar after you open your company in FattureInCloud (see the [Configuration](#configuration) table). Once the server is configured, *"Show me the info of the company connected to FattureInCloud"* confirms you picked the right company.
+
 ## Configuration
 
 | Env var | Required | Description |
@@ -92,7 +220,7 @@ Restart your MCP client after editing the config.
 | `FIC_CACHE_DIR` | no | Override cache directory (default `~/.fattureincloud-mcp/cache`) |
 | `FIC_CACHE_DISABLED` | no | Set to `1` to disable the local cache |
 
-**How to get the FattureInCloud credentials:** log into [FattureInCloud](https://secure.fattureincloud.it/), go to *Settings → API and Integrations*, create a **Manual Token** with the permissions you need. The `COMPANY_ID` is in the URL after `/c/` once you select a company.
+How to obtain the token and the company ID: see [Getting the FattureInCloud credentials](#getting-the-fattureincloud-credentials). The `COMPANY_ID` is in the URL after `/c/` once you select a company.
 
 ## Usage examples
 
