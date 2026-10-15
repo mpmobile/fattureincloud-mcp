@@ -13,14 +13,14 @@ MCP server that connects Claude (Desktop, Code, or any MCP client) to **FattureI
 
 > ⚠️ **Unofficial integration.** Not affiliated with, endorsed by, or sponsored by TeamSystem S.p.A., owner of the FattureInCloud trademark. The trademark is used here for descriptive purposes only.
 
-## Features (23 tools)
+## Features (24 tools)
 
 | Tool | Description |
 |------|-------------|
-| `list_invoices` | List issued invoices / credit notes / proformas by year / month |
+| `list_invoices` | List issued invoices / credit notes / proformas / quotes, filtered by client, date / date range / year-month, payment status (overdue, unpaid, ...) — paginated |
 | `get_invoice` | Full document detail by ID |
 | `get_pdf_url` | PDF URL and web link for a document |
-| `list_clients` | List clients with optional filter |
+| `list_clients` | List clients with optional name / VAT filter — paginated |
 | `get_company_info` | Connected company info |
 | `create_client` | Create a new client |
 | `update_client` | Update an existing client |
@@ -34,11 +34,12 @@ MCP server that connects Claude (Desktop, Code, or any MCP client) to **FattureI
 | `send_to_sdi` | Send invoice / credit note to the Italian e-invoice system (SDI) |
 | `get_invoice_status` | E-invoice status for a document |
 | `send_email` | Send a courtesy copy by email |
-| `list_received_documents` | List supplier documents (exposes `cost_center` when present) |
+| `list_received_documents` | List supplier documents by date / date range / year-month, paginated (exposes `cost_center` when present) |
 | `get_received_document` | Full detail of a received document by ID |
 | `create_received_document` | Create a passive document / expense (optional `cost_center`) |
 | `list_cost_centers` | List configured cost / revenue centers |
 | `get_situation` | Yearly dashboard: net revenue, collected, outstanding, costs, margin |
+| `get_client_situation` | Single-client situation: invoiced, credit notes, collected, outstanding, overdue, open invoices, proformas |
 | `check_numeration` | Verify invoice numbering continuity |
 
 > Marking payments as "paid" is intentionally not exposed: the FattureInCloud API requires a payment account that cannot be reliably retrieved through the SDK. Use the FattureInCloud web panel for that operation.

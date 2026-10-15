@@ -8,6 +8,7 @@ Author: Mediaform s.c.r.l. (https://media-form.it)
 License: MIT
 """
 
+import calendar
 import json
 import os
 import traceback
@@ -62,6 +63,143 @@ def get_total_from_doc(d):
         return sum(p.get('amount', 0) for p in payments)
     items = d.get('items_list', [])
     return sum((i.get('qty', 0) * i.get('gross_price', 0)) for i in items)
+
+
+# --- Listing helpers: query building + pagination ---------------------------
+
+PAGE_SIZE = 100            # FIC API max per_page
+DEFAULT_MAX_RESULTS = 500  # cap per call, protects the 1000 req/hour rate limit
+SITUATION_MAX_PER_TYPE = 2000  # one client, so a larger bound is still cheap
+ISSUED_LIST_FIELDS = ("id,type,number,date,entity,subject,visible_subject,"
+                      "rc_center,next_due_date,payments_list")
+ISSUED_TYPES = ("invoice", "credit_note", "proforma", "quote")
+# FIC sets next_due_date = null once every installment is paid. Proformas always
+# carry a next_due_date, so payment filters only make sense on these types.
+PAYMENT_STATUS_TYPES = ("invoice", "credit_note")
+PAYMENT_STATUSES = ("paid", "unpaid", "overdue", "not_overdue")
+
+
+def q_escape(value):
+    """Escape a string literal for the FIC `q` filter (SQL-style quote doubling)."""
+    return str(value).replace("'", "''")
+
+
+def _parse_date(value, field):
+    try:
+        return datetime.strptime(value, "%Y-%m-%d").strftime("%Y-%m-%d")
+    except (TypeError, ValueError):
+        raise ValueError(f"{field} deve essere nel formato YYYY-MM-DD (ricevuto: {value!r})")
+
+
+def build_date_clauses(arguments):
+    """Date filter, by precedence: date > date_from/date_to > year/month."""
+    if arguments.get("date"):
+        return [f"date = '{_parse_date(arguments['date'], 'date')}'"]
+    date_from, date_to = arguments.get("date_from"), arguments.get("date_to")
+    if date_from or date_to:
+        clauses = []
+        if date_from:
+            clauses.append(f"date >= '{_parse_date(date_from, 'date_from')}'")
+        if date_to:
+            clauses.append(f"date <= '{_parse_date(date_to, 'date_to')}'")
+        return clauses
+    year, month = arguments.get("year"), arguments.get("month")
+    if year and month:
+        last_day = calendar.monthrange(year, month)[1]
+        return [f"date >= '{year}-{month:02d}-01'", f"date <= '{year}-{month:02d}-{last_day}'"]
+    if year:
+        return [f"date >= '{year}-01-01'", f"date <= '{year}-12-31'"]
+    return []
+
+
+def payment_status_clause(status, today=None):
+    today = today or datetime.now().strftime("%Y-%m-%d")
+    clauses = {
+        "paid": "next_due_date = null",
+        "unpaid": "next_due_date != null",
+        "overdue": f"next_due_date < '{today}'",
+        "not_overdue": f"next_due_date >= '{today}'",
+    }
+    if status not in clauses:
+        raise ValueError(f"payment_status non valido: {status!r}. Valori: {', '.join(PAYMENT_STATUSES)}")
+    return clauses[status]
+
+
+def payment_status_of(d, today=None):
+    """Derive paid / overdue / not_overdue from next_due_date (invoice, credit_note only)."""
+    if d.get("type") and str(d["type"]).replace("IssuedDocumentType.", "").lower() not in PAYMENT_STATUS_TYPES:
+        return None
+    due = d.get("next_due_date")
+    if not due:
+        return "paid"
+    today = today or datetime.now().strftime("%Y-%m-%d")
+    return "overdue" if str(due) < today else "not_overdue"
+
+
+def fetch_all_pages(list_fn, max_results=DEFAULT_MAX_RESULTS, **kwargs):
+    """Call a FIC list endpoint page by page. Returns (docs as dicts, total on FIC).
+    max_results=None fetches everything (use only for bounded queries, e.g. one year)."""
+    docs, page = [], 1
+    while True:
+        resp = list_fn(company_id=COMPANY_ID, per_page=PAGE_SIZE, page=page, **kwargs)
+        docs.extend(d.to_dict() for d in (resp.data or []))
+        total = resp.total or 0
+        if (max_results and len(docs) >= max_results) or page >= (resp.last_page or 1):
+            break
+        page += 1
+    return (docs[:max_results] if max_results else docs), total
+
+
+def issued_doc_row(d, doc_type):
+    """Compact representation of an issued document for list outputs."""
+    entity = d.get("entity") or {}
+    row = {
+        "id": d.get("id"),
+        "type": doc_type,
+        "number": d.get("number"),
+        "date": str(d.get("date", "")),
+        "client": entity.get("name"),
+        "client_id": entity.get("id"),
+        "total": get_total_from_doc(d),
+        "subject": d.get("subject"),
+        "description": d.get("visible_subject"),
+    }
+    status = payment_status_of({**d, "type": doc_type})
+    if status:
+        row["payment_status"] = status
+        row["next_due_date"] = str(d["next_due_date"]) if d.get("next_due_date") else None
+    if d.get("rc_center"):
+        row["revenue_center"] = d["rc_center"]
+    return row
+
+
+def payment_status_name(p):
+    return str(p.get("status", "")).replace("IssuedDocumentStatus.", "").lower()
+
+
+def resolve_client(arguments):
+    """Return (client dict, None) or (None, error/candidates payload) from client_id or client_name."""
+    if arguments.get("client_id"):
+        client = get_client_by_id(int(arguments["client_id"]))
+        if not client:
+            return None, {"error": f"Cliente {arguments['client_id']} non trovato"}
+        return {"id": client.get("id"), "name": client.get("name")}, None
+    name = (arguments.get("client_name") or "").strip()
+    if not name:
+        return None, {"error": "Specificare client_id oppure client_name"}
+    rows, total = fetch_all_pages(clients_api.list_clients, max_results=50,
+                                  q=f"name like '%{q_escape(name)}%'", sort="name")
+    exact = [r for r in rows if (r.get("name") or "").strip().lower() == name.lower()]
+    if len(exact) == 1:
+        rows = exact
+    if len(rows) == 1:
+        return {"id": rows[0]["id"], "name": rows[0]["name"]}, None
+    if not rows:
+        return None, {"error": f"Nessun cliente corrisponde a '{name}'"}
+    return None, {
+        "error": f"'{name}' corrisponde a {total} clienti: richiamare con client_id",
+        "candidates": [{"id": r["id"], "name": r["name"], "vat": r.get("vat_number")} for r in rows],
+    }
 
 
 def get_client_by_id(client_id, *, company_id=None):
@@ -256,16 +394,32 @@ async def list_tools():
     return [
         Tool(
             name="list_invoices",
-            description="Lista documenti emessi. Parametri: year (int), month (int opzionale), query (str opzionale), type (str opzionale: invoice, credit_note, proforma — default: invoice)",
+            description=(
+                "Lista documenti emessi (fatture, NDC, proforma, preventivi) con paginazione automatica. "
+                "Filtri combinabili: tipo/i documento, cliente (client_id o client_name), periodo "
+                "(date esatta, oppure date_from/date_to, oppure year/month), stato pagamento "
+                "(paid, unpaid, overdue = scadute, not_overdue = non ancora scadute; solo fatture e NDC). "
+                "Ordinati dal più recente. La risposta indica total (documenti su FIC) e truncated "
+                "(true se oltre max_results). Per i totali di un cliente usa get_client_situation."
+            ),
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "year": {"type": "integer", "description": "Anno (es. 2024)"},
-                    "month": {"type": "integer", "description": "Mese 1-12 (opzionale)"},
-                    "query": {"type": "string", "description": "Filtro testuale (opzionale)"},
-                    "type": {"type": "string", "description": "Tipo documento: invoice (default), credit_note, proforma"}
-                },
-                "required": ["year"]
+                    "types": {"type": "array", "items": {"type": "string", "enum": list(ISSUED_TYPES)},
+                              "description": "Tipi documento (default: [\"invoice\"]). Es. [\"invoice\", \"proforma\"]"},
+                    "type": {"type": "string", "description": "Deprecato: tipo singolo, usa types"},
+                    "client_id": {"type": "integer", "description": "ID cliente (da list_clients). Preferibile a client_name"},
+                    "client_name": {"type": "string", "description": "Nome cliente, ricerca parziale case-insensitive"},
+                    "date": {"type": "string", "description": "Data esatta YYYY-MM-DD"},
+                    "date_from": {"type": "string", "description": "Data inizio YYYY-MM-DD (inclusa)"},
+                    "date_to": {"type": "string", "description": "Data fine YYYY-MM-DD (inclusa)"},
+                    "year": {"type": "integer", "description": "Anno (es. 2024), se non si usano date/date_from/date_to"},
+                    "month": {"type": "integer", "description": "Mese 1-12, insieme a year"},
+                    "payment_status": {"type": "string", "enum": list(PAYMENT_STATUSES),
+                                       "description": "paid = saldate, unpaid = da incassare, overdue = scadute, not_overdue = da incassare non ancora scadute"},
+                    "query": {"type": "string", "description": "Filtro testuale su cliente/oggetto (applicato dopo il recupero)"},
+                    "max_results": {"type": "integer", "description": f"Massimo documenti restituiti (default {DEFAULT_MAX_RESULTS})"}
+                }
             },
             annotations=_ann(read_only=True, idempotent=True),
         ),
@@ -295,11 +449,13 @@ async def list_tools():
         ),
         Tool(
             name="list_clients",
-            description="Lista clienti",
+            description="Lista clienti (paginazione automatica). La risposta indica total e truncated.",
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "query": {"type": "string", "description": "Filtro nome/ragione sociale (opzionale)"}
+                    "query": {"type": "string", "description": "Filtro nome/ragione sociale, ricerca parziale (opzionale)"},
+                    "vat_number": {"type": "string", "description": "Partita IVA esatta (opzionale)"},
+                    "max_results": {"type": "integer", "description": f"Massimo clienti restituiti (default {DEFAULT_MAX_RESULTS})"}
                 }
             },
             annotations=_ann(read_only=True, idempotent=True),
@@ -520,16 +676,22 @@ async def list_tools():
         ),
         Tool(
             name="list_received_documents",
-            description="Lista fatture PASSIVE (ricevute dai fornitori). Parametri: year, month (opzionale), type (opzionale: expense, credit_note)",
+            description=(
+                "Lista fatture PASSIVE (ricevute dai fornitori) con paginazione automatica. Periodo: date esatta, "
+                "oppure date_from/date_to, oppure year/month. La risposta indica total e truncated."
+            ),
             inputSchema={
                 "type": "object",
                 "properties": {
                     "year": {"type": "integer", "description": "Anno"},
-                    "month": {"type": "integer", "description": "Mese 1-12 (opzionale)"},
+                    "month": {"type": "integer", "description": "Mese 1-12, insieme a year"},
+                    "date": {"type": "string", "description": "Data esatta YYYY-MM-DD"},
+                    "date_from": {"type": "string", "description": "Data inizio YYYY-MM-DD (inclusa)"},
+                    "date_to": {"type": "string", "description": "Data fine YYYY-MM-DD (inclusa)"},
                     "type": {"type": "string", "description": "Tipo: expense, credit_note (default: expense)"},
-                    "query": {"type": "string", "description": "Filtro testuale (opzionale)"}
-                },
-                "required": ["year"]
+                    "query": {"type": "string", "description": "Filtro testuale su fornitore/descrizione (applicato dopo il recupero)"},
+                    "max_results": {"type": "integer", "description": f"Massimo documenti restituiti (default {DEFAULT_MAX_RESULTS})"}
+                }
             },
             annotations=_ann(read_only=True, idempotent=True),
         ),
@@ -541,6 +703,29 @@ async def list_tools():
                 "properties": {
                     "year": {"type": "integer", "description": "Anno (default: corrente)"},
                     "client_name": {"type": "string", "description": "Filtro per nome cliente (opzionale, ricerca parziale)"}
+                }
+            },
+            annotations=_ann(read_only=True, idempotent=True),
+        ),
+        Tool(
+            name="get_client_situation",
+            description=(
+                "Situazione di un singolo cliente su tutto lo storico o su un periodo: fatturato, note di credito, "
+                "netto, incassato, da incassare, scaduto, elenco fatture aperte con scadenze e proforma "
+                "maturate (data raggiunta, conteggiate nell'esposizione_totale) e future (non conteggiate). Se client_name corrisponde a più clienti restituisce i candidati: "
+                "richiamare con client_id."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "client_id": {"type": "integer", "description": "ID cliente (preferibile)"},
+                    "client_name": {"type": "string", "description": "Nome cliente, ricerca parziale"},
+                    "date_from": {"type": "string", "description": "Data inizio YYYY-MM-DD (default: tutto lo storico)"},
+                    "date_to": {"type": "string", "description": "Data fine YYYY-MM-DD"},
+                    "year": {"type": "integer", "description": "Anno, in alternativa a date_from/date_to"},
+                    "include": {"type": "array", "items": {"type": "string", "enum": ["invoice", "credit_note", "proforma"]},
+                                "description": "Tipi da considerare (default: tutti e tre)"},
+                    "include_documents": {"type": "boolean", "description": "Includi l'elenco completo dei documenti (default: false)"}
                 }
             },
             annotations=_ann(read_only=True, idempotent=True),
@@ -602,39 +787,57 @@ async def list_tools():
 async def call_tool(name: str, arguments: dict) -> list[TextContent]:
     try:
         if name == "list_invoices":
-            year = arguments.get("year", 2024)
-            month = arguments.get("month")
-            query = arguments.get("query")
-            doc_type = arguments.get("type", "invoice")
+            types = arguments.get("types") or [arguments.get("type") or "invoice"]
+            unknown = [t for t in types if t not in ISSUED_TYPES]
+            if unknown:
+                raise ValueError(f"Tipi non validi: {unknown}. Valori: {', '.join(ISSUED_TYPES)}")
+            query = (arguments.get("query") or "").lower()
+            payment_status = arguments.get("payment_status")
+            max_results = arguments.get("max_results") or DEFAULT_MAX_RESULTS
 
-            q = f"date >= '{year}-01-01' and date <= '{year}-12-31'"
-            if month:
-                last_day = 31 if month in [1,3,5,7,8,10,12] else 30 if month in [4,6,9,11] else 29
-                q = f"date >= '{year}-{month:02d}-01' and date <= '{year}-{month:02d}-{last_day}'"
+            base = build_date_clauses(arguments)
+            if arguments.get("client_id"):
+                base.append(f"entity.id = {int(arguments['client_id'])}")
+            elif arguments.get("client_name"):
+                base.append(f"entity.name like '%{q_escape(arguments['client_name'])}%'")
 
-            response = issued_api.list_issued_documents(
-                company_id=COMPANY_ID, type=doc_type, q=q, per_page=100, fieldset="detailed"
-            )
-            invoices = []
-            for doc in (response.data or []):
-                d = doc.to_dict()
-                inv = {
-                    "id": d.get("id"),
-                    "number": d.get("number"),
-                    "date": str(d.get("date", "")),
-                    "client": d.get("entity", {}).get("name") if d.get("entity") else None,
-                    "total": get_total_from_doc(d),
-                    "subject": d.get("subject"),
-                    "description": d.get("visible_subject")
-                }
-                if d.get("rc_center"):
-                    inv["revenue_center"] = d["rc_center"]
-                if query:
-                    search_text = f"{inv['client']} {inv['subject']} {inv['description']}".lower()
-                    if query.lower() not in search_text:
+            documents, by_type, notes = [], {}, []
+            for doc_type in types:
+                clauses = list(base)
+                if payment_status:
+                    if doc_type not in PAYMENT_STATUS_TYPES:
+                        notes.append(f"{doc_type} esclusi: payment_status vale solo per {', '.join(PAYMENT_STATUS_TYPES)}")
                         continue
-                invoices.append(inv)
-            return [TextContent(type="text", text=json.dumps(invoices, indent=2, ensure_ascii=False))]
+                    clauses.append(payment_status_clause(payment_status))
+                docs, total = fetch_all_pages(
+                    issued_api.list_issued_documents, max_results=max_results,
+                    type=doc_type, q=" and ".join(clauses) or None, sort="-date", fields=ISSUED_LIST_FIELDS,
+                )
+                by_type[doc_type] = {"total": total, "fetched": len(docs)}
+                for d in docs:
+                    inv = issued_doc_row(d, doc_type)
+                    if query:
+                        search_text = f"{inv['client']} {inv['subject']} {inv['description']}".lower()
+                        if query not in search_text:
+                            continue
+                    documents.append(inv)
+
+            documents.sort(key=lambda x: x["date"], reverse=True)
+            total = sum(t["total"] for t in by_type.values())
+            truncated = any(t["fetched"] < t["total"] for t in by_type.values()) or len(documents) > max_results
+            result = {
+                "total": total,
+                "returned": min(len(documents), max_results),
+                "truncated": truncated,
+                "by_type": by_type,
+                "documents": documents[:max_results],
+            }
+            if notes:
+                result["notes"] = notes
+            if truncated:
+                result["notes"] = result.get("notes", []) + [
+                    f"Risultati limitati a {max_results}: restringi il periodo o aumenta max_results"]
+            return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
 
         elif name == "get_invoice":
             doc_id = arguments["document_id"]
@@ -703,18 +906,22 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
 
         elif name == "list_clients":
-            query = arguments.get("query")
-            response = clients_api.list_clients(company_id=COMPANY_ID, per_page=100)
-            clients = []
-            for c in (response.data or []):
-                cd = c.to_dict()
-                client = {"id": cd.get("id"), "name": cd.get("name"),
-                          "vat": cd.get("vat_number"), "tax_code": cd.get("tax_code"),
-                          "email": cd.get("email")}
-                if query and query.lower() not in (client['name'] or '').lower():
-                    continue
-                clients.append(client)
-            return [TextContent(type="text", text=json.dumps(clients, indent=2, ensure_ascii=False))]
+            max_results = arguments.get("max_results") or DEFAULT_MAX_RESULTS
+            clauses = []
+            if arguments.get("query"):
+                clauses.append(f"name like '%{q_escape(arguments['query'])}%'")
+            if arguments.get("vat_number"):
+                clauses.append(f"vat_number = '{q_escape(arguments['vat_number'])}'")
+            rows, total = fetch_all_pages(
+                clients_api.list_clients, max_results=max_results,
+                q=" and ".join(clauses) or None, sort="name",
+            )
+            clients = [{"id": cd.get("id"), "name": cd.get("name"),
+                        "vat": cd.get("vat_number"), "tax_code": cd.get("tax_code"),
+                        "email": cd.get("email")} for cd in rows]
+            result = {"total": total, "returned": len(clients),
+                      "truncated": len(clients) < total, "clients": clients}
+            return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
 
         elif name == "get_company_info":
             response = companies_api.get_company_info(company_id=COMPANY_ID)
@@ -1211,20 +1418,17 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
 
         elif name == "list_received_documents":
-            year = arguments.get("year", datetime.now().year)
-            month = arguments.get("month")
             doc_type = arguments.get("type", "expense")
             query = arguments.get("query")
-            q = f"date >= '{year}-01-01' and date <= '{year}-12-31'"
-            if month:
-                last_day = 31 if month in [1,3,5,7,8,10,12] else 30 if month in [4,6,9,11] else 29
-                q = f"date >= '{year}-{month:02d}-01' and date <= '{year}-{month:02d}-{last_day}'"
-            response = received_api.list_received_documents(
-                company_id=COMPANY_ID, type=doc_type, q=q, per_page=100, fieldset="detailed"
+            max_results = arguments.get("max_results") or DEFAULT_MAX_RESULTS
+            period = arguments if any(arguments.get(k) for k in ("date", "date_from", "date_to", "year")) \
+                else {"year": datetime.now().year}
+            rows, total = fetch_all_pages(
+                received_api.list_received_documents, max_results=max_results,
+                type=doc_type, q=" and ".join(build_date_clauses(period)), sort="-date", fieldset="detailed",
             )
             docs = []
-            for doc in (response.data or []):
-                d = doc.to_dict()
+            for d in rows:
                 supplier_name = d.get('entity', {}).get('name', '') if d.get('entity') else ''
                 desc = d.get('description', '') or ''
                 if query and query.lower() not in f"{supplier_name} {desc}".lower():
@@ -1237,34 +1441,35 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                 if d.get("rc_center"):
                     entry["cost_center"] = d["rc_center"]
                 docs.append(entry)
-            return [TextContent(type="text", text=json.dumps(docs, indent=2, ensure_ascii=False))]
+            result = {"total": total, "returned": len(docs), "truncated": len(rows) < total, "documents": docs}
+            return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
 
         elif name == "get_situation":
             year = arguments.get("year", datetime.now().year)
-            client_filter = (arguments.get("client_name") or "").lower().strip()
-            q = f"date >= '{year}-01-01' and date <= '{year}-12-31'"
+            client_filter = (arguments.get("client_name") or "").strip()
+            clauses = build_date_clauses({"year": year})
+            if client_filter:
+                clauses.append(f"entity.name like '%{q_escape(client_filter)}%'")
+            q = " and ".join(clauses)
 
-            emesse_resp = issued_api.list_issued_documents(
-                company_id=COMPANY_ID, type="invoice", q=q, per_page=100, fieldset="detailed"
-            )
-            ndc_resp = issued_api.list_issued_documents(
-                company_id=COMPANY_ID, type="credit_note", q=q, per_page=100, fieldset="detailed"
-            )
+            # One year is bounded, so fetch every page: partial totals would be wrong totals.
+            emesse, _ = fetch_all_pages(issued_api.list_issued_documents, max_results=None,
+                                        type="invoice", q=q, fields=ISSUED_LIST_FIELDS)
+            ndc_docs, _ = fetch_all_pages(issued_api.list_issued_documents, max_results=None,
+                                          type="credit_note", q=q, fields=ISSUED_LIST_FIELDS)
 
-            totale_fatturato = totale_incassato = totale_ndc = 0
+            totale_fatturato = totale_incassato = totale_da_incassare = totale_ndc = 0
             fatture_non_pagate = []
 
-            for doc in (emesse_resp.data or []):
-                d = doc.to_dict()
-                client_name = d.get('entity', {}).get('name', '') if d.get('entity') else ''
-                if client_filter and client_filter not in client_name.lower():
-                    continue
+            for d in emesse:
+                client_name = (d.get('entity') or {}).get('name', '')
                 totale_fatturato += get_total_from_doc(d)
-                for p in d.get('payments_list', []):
-                    status = str(p.get('status', '')).replace('IssuedDocumentStatus.', '')
+                for p in d.get('payments_list') or []:
+                    status = payment_status_name(p)
                     if status == 'paid':
                         totale_incassato += p.get('amount', 0)
                     elif status == 'not_paid':
+                        totale_da_incassare += p.get('amount', 0)
                         fatture_non_pagate.append({
                             "number": d.get("number"),
                             "client": client_name,
@@ -1272,24 +1477,17 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                             "due_date": str(p.get('due_date', ''))
                         })
 
-            for doc in (ndc_resp.data or []):
-                d = doc.to_dict()
-                client_name = d.get('entity', {}).get('name', '') if d.get('entity') else ''
-                if client_filter and client_filter not in client_name.lower():
-                    continue
+            for d in ndc_docs:
                 totale_ndc += abs(get_total_from_doc(d))
 
             fatturato_netto = totale_fatturato - totale_ndc
 
             totale_costi = 0
             if not client_filter:
-                ricevute_resp = received_api.list_received_documents(
-                    company_id=COMPANY_ID, type="expense", q=q, per_page=100, fieldset="detailed"
-                )
-                totale_costi = sum(
-                    d.to_dict().get('amount_gross') or d.to_dict().get('amount_net') or 0
-                    for d in (ricevute_resp.data or [])
-                )
+                ricevute, _ = fetch_all_pages(received_api.list_received_documents, max_results=None,
+                                              type="expense", q=" and ".join(build_date_clauses({"year": year})),
+                                              fieldset="detailed")
+                totale_costi = sum(d.get('amount_gross') or d.get('amount_net') or 0 for d in ricevute)
 
             fatture_non_pagate.sort(key=lambda x: x.get('due_date', ''))
             result = {
@@ -1299,11 +1497,105 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                 "note_credito": round(totale_ndc, 2),
                 "fatturato_netto": round(fatturato_netto, 2),
                 "incassato": round(totale_incassato, 2),
-                "da_incassare": round(fatturato_netto - totale_incassato, 2),
+                "da_incassare": round(totale_da_incassare, 2),
                 "costi_totali": round(totale_costi, 2) if not client_filter else "N/A (filtro cliente attivo)",
                 "margine_lordo": round(fatturato_netto - totale_costi, 2) if not client_filter else "N/A",
                 "prossime_scadenze": fatture_non_pagate[:10]
             }
+            return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
+
+        elif name == "get_client_situation":
+            client, problem = resolve_client(arguments)
+            if problem:
+                return [TextContent(type="text", text=json.dumps(problem, indent=2, ensure_ascii=False))]
+            include = arguments.get("include") or ["invoice", "credit_note", "proforma"]
+            clauses = build_date_clauses(arguments) + [f"entity.id = {client['id']}"]
+            today = datetime.now().strftime("%Y-%m-%d")
+
+            docs_by_type, counts, truncated = {}, {}, False
+            for doc_type in include:
+                docs, total = fetch_all_pages(
+                    issued_api.list_issued_documents, max_results=SITUATION_MAX_PER_TYPE,
+                    type=doc_type, q=" and ".join(clauses), sort="-date", fields=ISSUED_LIST_FIELDS,
+                )
+                docs_by_type[doc_type] = docs
+                counts[doc_type] = total
+                truncated = truncated or len(docs) < total
+
+            fatturato = incassato = da_incassare = scaduto = stornato = 0
+            aperte = []
+            for d in docs_by_type.get("invoice", []):
+                fatturato += get_total_from_doc(d)
+                for p in d.get("payments_list") or []:
+                    amount = p.get("amount", 0) or 0
+                    status = payment_status_name(p)
+                    if status == "paid":
+                        incassato += amount
+                    elif status == "reversed":  # installment cancelled, typically by a credit note
+                        stornato += amount
+                    elif status == "not_paid":
+                        due = str(p.get("due_date") or "")
+                        da_incassare += amount
+                        if due and due < today:
+                            scaduto += amount
+                        aperte.append({"id": d.get("id"), "number": d.get("number"), "date": str(d.get("date", "")),
+                                       "amount": amount, "due_date": due or None,
+                                       "overdue": bool(due and due < today)})
+            ndc = sum(abs(get_total_from_doc(d)) for d in docs_by_type.get("credit_note", []))
+            ndc_aperte = [d.get("number") for d in docs_by_type.get("credit_note", []) if d.get("next_due_date")]
+            proforma = docs_by_type.get("proforma", [])
+            all_dates = [str(d.get("date")) for docs in docs_by_type.values() for d in docs if d.get("date")]
+
+            aperte.sort(key=lambda x: x["due_date"] or "")
+            result = {
+                "cliente": client,
+                "periodo": {k: arguments[k] for k in ("date_from", "date_to", "year") if arguments.get(k)}
+                           or "tutto lo storico",
+                "numero_documenti": counts,
+                "primo_documento": min(all_dates) if all_dates else None,
+                "ultimo_documento": max(all_dates) if all_dates else None,
+            }
+            if "invoice" in include:
+                result.update({
+                    "fatturato_lordo": round(fatturato, 2),
+                    "incassato": round(incassato, 2),
+                    "da_incassare": round(da_incassare, 2),
+                    "di_cui_scaduto": round(scaduto, 2),
+                    "stornato": round(stornato, 2),
+                    "fatture_aperte": aperte,
+                })
+            if "credit_note" in include:
+                result["note_credito"] = round(ndc, 2)
+                if ndc_aperte:
+                    result["note_credito_non_saldate"] = ndc_aperte
+            if "invoice" in include and "credit_note" in include:
+                result["fatturato_netto"] = round(fatturato - ndc, 2)
+            if "proforma" in include:
+                # A proforma is matured once its document date is reached: it counts in the
+                # client position. Future-dated proformas are scheduled billing and don't count.
+                matured = [d for d in proforma if str(d.get("date", "")) <= today]
+                future = sorted((d for d in proforma if str(d.get("date", "")) > today),
+                                key=lambda d: str(d.get("date", "")))
+                matured_open = sum(p.get("amount", 0) or 0 for d in matured
+                                   for p in d.get("payments_list") or [] if payment_status_name(p) == "not_paid")
+                result["proforma_maturate"] = {
+                    "numero": len(matured),
+                    "da_incassare": round(matured_open, 2),
+                    "documenti": [issued_doc_row(d, "proforma") for d in matured],
+                }
+                result["proforma_future"] = {
+                    "numero": len(future),
+                    "totale": round(sum(get_total_from_doc(d) for d in future), 2),
+                    "nota": "Non conteggiate nella posizione: data non ancora raggiunta",
+                    "prossime": [issued_doc_row(d, "proforma") for d in future[:10]],
+                }
+                result["esposizione_totale"] = round(da_incassare + matured_open, 2)
+            if truncated:
+                result["attenzione"] = f"Oltre {SITUATION_MAX_PER_TYPE} documenti per tipo: totali parziali, restringere il periodo"
+            if arguments.get("include_documents"):
+                result["documenti"] = sorted(
+                    (issued_doc_row(d, t) for t, docs in docs_by_type.items() for d in docs),
+                    key=lambda x: x["date"], reverse=True)
             return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
 
         elif name == "check_numeration":

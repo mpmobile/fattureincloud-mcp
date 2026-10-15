@@ -240,13 +240,15 @@ def test_list_invoices_includes_revenue_center(server_module):
     }
     list_response = MagicMock()
     list_response.data = [doc1, doc2]
+    list_response.total = 2
+    list_response.last_page = 1
 
     with patch.object(server.issued_api, "list_issued_documents", return_value=list_response):
         result = _run(server.call_tool("list_invoices", {"year": 2026}))
 
-    invoices = json.loads(result[0].text)
-    assert invoices[0]["revenue_center"] == "Project Alpha"
-    assert "revenue_center" not in invoices[1]
+    invoices = {d["id"]: d for d in json.loads(result[0].text)["documents"]}
+    assert invoices[1]["revenue_center"] == "Project Alpha"
+    assert "revenue_center" not in invoices[2]
 
 
 def test_update_document_validates_revenue_center(server_module):
@@ -398,10 +400,12 @@ def test_list_received_documents_includes_cost_center(server_module):
     }
     list_response = MagicMock()
     list_response.data = [doc1, doc2]
+    list_response.total = 2
+    list_response.last_page = 1
 
     with patch.object(server.received_api, "list_received_documents", return_value=list_response):
         result = _run(server.call_tool("list_received_documents", {"year": 2026}))
 
-    docs = json.loads(result[0].text)
-    assert docs[0]["cost_center"] == "Project Alpha"
-    assert "cost_center" not in docs[1]
+    docs = {d["id"]: d for d in json.loads(result[0].text)["documents"]}
+    assert docs[1]["cost_center"] == "Project Alpha"
+    assert "cost_center" not in docs[2]
