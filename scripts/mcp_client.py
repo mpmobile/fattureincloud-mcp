@@ -25,6 +25,8 @@ ROOT = Path(__file__).resolve().parent.parent
 
 
 async def run(tool, args, schema):
+    """Returns the process exit code. Exiting inside the session would surface as an
+    ExceptionGroup traceback from the async task group, so main() exits instead."""
     load_dotenv(ROOT / ".env")
     params = StdioServerParameters(
         command=sys.executable,
@@ -40,22 +42,22 @@ async def run(tool, args, schema):
             if schema:
                 match = next((t for t in tools if t.name == schema), None)
                 if match is None:
-                    sys.exit(f"Tool '{schema}' not found")
+                    print(f"Tool '{schema}' not found", file=sys.stderr)
+                    return 1
                 print(match.description)
                 print(json.dumps(match.inputSchema, indent=2, ensure_ascii=False))
-                return
+                return 0
 
             if tool is None:
                 for t in tools:
                     print(f"{t.name:30} {t.description[:90]}")
                 print(f"\n{len(tools)} tools")
-                return
+                return 0
 
             result = await session.call_tool(tool, args)
             for block in result.content:
                 print(getattr(block, "text", block))
-            if result.isError:
-                sys.exit(1)
+            return 1 if result.isError else 0
 
 
 def main():
@@ -64,7 +66,7 @@ def main():
     parser.add_argument("args", nargs="?", default="{}", help="tool arguments as JSON")
     parser.add_argument("--schema", metavar="TOOL", help="print description and inputSchema of a tool")
     ns = parser.parse_args()
-    asyncio.run(run(ns.tool, json.loads(ns.args), ns.schema))
+    sys.exit(asyncio.run(run(ns.tool, json.loads(ns.args), ns.schema)))
 
 
 if __name__ == "__main__":
