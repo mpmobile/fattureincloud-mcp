@@ -85,6 +85,8 @@
     {"name": "send_to_sdi", "description": "Send an invoice or credit note to the Italian Sistema di Interscambio (SDI). Irreversible."},
     {"name": "get_invoice_status", "description": "Read the e-invoice / SDI status of a document."},
     {"name": "send_email", "description": "Send a courtesy copy of a document by email. Requires the FIC_SENDER_EMAIL env var."},
+    {"name": "list_payment_accounts", "description": "List payment accounts (banks, cards, PayPal, cash) configured in FattureInCloud."},
+    {"name": "register_payment", "description": "Mark an installment, or all open ones, as paid with payment date and account. Works on invoices already sent to SDI; other installments are left unchanged."},
     {"name": "list_received_documents", "description": "List received (supplier) documents — expenses or received credit notes — with automatic pagination, exact date / date range / year-month and free-text query."},
     {"name": "get_situation", "description": "Yearly financial dashboard: net revenue (invoices minus credit notes), collected, outstanding, costs, margin. Optional client filter."},
     {"name": "get_client_situation", "description": "Single-client situation over the full history or a period: invoiced, credit notes, net, collected, outstanding, overdue, open invoices with due dates, proforma total."},

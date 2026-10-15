@@ -13,7 +13,7 @@ MCP server that connects Claude (Desktop, Code, or any MCP client) to **FattureI
 
 > ⚠️ **Unofficial integration.** Not affiliated with, endorsed by, or sponsored by TeamSystem S.p.A., owner of the FattureInCloud trademark. The trademark is used here for descriptive purposes only.
 
-## Features (25 tools)
+## Features (27 tools)
 
 | Tool | Description |
 |------|-------------|
@@ -34,6 +34,8 @@ MCP server that connects Claude (Desktop, Code, or any MCP client) to **FattureI
 | `send_to_sdi` | Send invoice / credit note to the Italian e-invoice system (SDI) |
 | `get_invoice_status` | E-invoice status for a document |
 | `send_email` | Send a courtesy copy by email |
+| `list_payment_accounts` | List payment accounts (banks, cards, PayPal, cash) |
+| `register_payment` | Mark an installment (or all open ones) as paid, with payment date and account; works on invoices already sent to SDI |
 | `list_received_documents` | List supplier documents by date / date range / year-month, paginated (exposes `cost_center` when present) |
 | `get_received_document` | Full detail of a received document by ID |
 | `create_received_document` | Create a passive document / expense (optional `cost_center`) |
@@ -43,7 +45,6 @@ MCP server that connects Claude (Desktop, Code, or any MCP client) to **FattureI
 | `get_situazione_crediti` | Receivables dashboard data: yearly totals, clients ranked by revenue and by exposure, aging, top N |
 | `check_numeration` | Verify invoice numbering continuity |
 
-> Marking payments as "paid" is intentionally not exposed: the FattureInCloud API requires a payment account that cannot be reliably retrieved through the SDK. Use the FattureInCloud web panel for that operation.
 
 ## Installation
 
@@ -294,7 +295,7 @@ Issues and pull requests welcome at https://github.com/aringad/fattureincloud-mc
 For any code change:
 
 1. Fork and branch from `main` (`feat/...`, `fix/...`, `docs/...`).
-2. Run `pytest tests/` — all 39 tests must stay green.
+2. Run `pytest tests/` — all tests must stay green.
 3. New code targeting cost-center / cache / new tools should ship with tests (target ≥80% coverage on new modules).
 4. Conventional commits style (`feat:`, `fix:`, `docs:`, `chore:`, `test:`).
 5. Open a PR. The maintainer reviews changes against the FattureInCloud API contract.
