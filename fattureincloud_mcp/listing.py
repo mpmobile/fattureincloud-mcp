@@ -1,6 +1,7 @@
 """Listing helpers: FIC `q` filter building, pagination, compact document rows."""
 
 import calendar
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from typing import Literal
 
@@ -116,6 +117,22 @@ def fetch_all_pages(list_fn, max_results=DEFAULT_MAX_RESULTS, **kwargs):
             break
         page += 1
     return (docs[:max_results] if max_results else docs), total
+
+
+def fetch_all_pages_parallel(list_fn, workers=6, **kwargs):
+    """Like fetch_all_pages with no cap, but pages after the first are fetched concurrently.
+
+    For whole-history scans (the full invoice archive is ~60 pages: ~50s in sequence, ~6s
+    in parallel). FIC limits requests per hour, not concurrent ones; the request count
+    is the same."""
+    def page(n):
+        return list_fn(company_id=fic.COMPANY_ID, per_page=PAGE_SIZE, page=n, **kwargs)
+    first = page(1)
+    docs = [d.to_dict() for d in (first.data or [])]
+    with ThreadPoolExecutor(workers) as pool:
+        for resp in pool.map(page, range(2, (first.last_page or 1) + 1)):
+            docs.extend(d.to_dict() for d in (resp.data or []))
+    return docs, first.total or 0
 
 
 def issued_doc_row(d, doc_type):
