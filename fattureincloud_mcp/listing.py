@@ -1,9 +1,14 @@
 """Listing helpers: FIC `q` filter building, pagination, compact document rows."""
 
 import calendar
+import inspect
+import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from typing import Literal
+
+from fattureincloud_python_sdk.exceptions import ApiException
 
 from . import fic
 from .lookups import get_client_by_id
@@ -105,12 +110,61 @@ def payment_status_name(p):
     return str(p.get("status", "")).replace("IssuedDocumentStatus.", "").lower()
 
 
+# --- Resilient API calls -------------------------------------------------------
+# FIC limits the NUMBER of requests (1000/hour, 40000/month), not their pace: a fixed delay
+# between calls costs time without saving quota. What helps is fewer requests (caching) and
+# backing off only when FIC says so (429) or is briefly unavailable (5xx).
+
+RETRY_STATUSES = {429, 500, 502, 503, 504}
+MAX_ATTEMPTS = 4
+quota = {}  # last RateLimit-* headers seen: hourly / monthly remaining and limits
+_quota_lock = threading.Lock()
+
+
+def _record_quota(headers):
+    if not headers:
+        return
+    values = {k.lower(): v for k, v in dict(headers).items() if k.lower().startswith("ratelimit-")}
+    if values:
+        with _quota_lock:
+            quota.update(values)
+
+
+def is_firewall_block(e):
+    """403 from the AWS load balancer in front of the API (HTML body), not from FIC itself.
+    It rejects some `q` shapes as injection-like, e.g. "date >= '...' and next_due_date != null"."""
+    headers = {k.lower(): v for k, v in dict(getattr(e, "headers", None) or {}).items()}
+    return getattr(e, "status", None) == 403 and ("awselb" in headers.get("server", "")
+                                                   or str(getattr(e, "body", "")).lstrip().startswith("<html"))
+
+
+def api_call(list_fn, **kwargs):
+    """Call a FIC SDK method with retries on 429 / 5xx, honouring Retry-After, and record the
+    quota headers. Uses the method's *_with_http_info variant to see the headers."""
+    with_info = None
+    if inspect.ismethod(list_fn):  # real SDK method (tests patch them with mocks)
+        with_info = getattr(list_fn.__self__, f"{list_fn.__name__}_with_http_info", None)
+    for attempt in range(1, MAX_ATTEMPTS + 1):
+        try:
+            if with_info is None:
+                return list_fn(**kwargs)
+            response = with_info(**kwargs)
+            _record_quota(response.headers)
+            return response.data
+        except ApiException as e:
+            _record_quota(getattr(e, "headers", None))
+            if e.status not in RETRY_STATUSES or attempt == MAX_ATTEMPTS:
+                raise
+            retry_after = {k.lower(): v for k, v in dict(e.headers or {}).items()}.get("retry-after")
+            time.sleep(float(retry_after) if retry_after and retry_after.isdigit() else 2 ** attempt)
+
+
 def fetch_all_pages(list_fn, max_results=DEFAULT_MAX_RESULTS, **kwargs):
     """Call a FIC list endpoint page by page. Returns (docs as dicts, total on FIC).
     max_results=None fetches everything (use only for bounded queries, e.g. one year)."""
     docs, page = [], 1
     while True:
-        resp = list_fn(company_id=fic.COMPANY_ID, per_page=PAGE_SIZE, page=page, **kwargs)
+        resp = api_call(list_fn, company_id=fic.COMPANY_ID, per_page=PAGE_SIZE, page=page, **kwargs)
         docs.extend(d.to_dict() for d in (resp.data or []))
         total = resp.total or 0
         if (max_results and len(docs) >= max_results) or page >= (resp.last_page or 1):
@@ -119,14 +173,13 @@ def fetch_all_pages(list_fn, max_results=DEFAULT_MAX_RESULTS, **kwargs):
     return (docs[:max_results] if max_results else docs), total
 
 
-def fetch_all_pages_parallel(list_fn, workers=6, **kwargs):
+def fetch_all_pages_parallel(list_fn, workers=3, **kwargs):
     """Like fetch_all_pages with no cap, but pages after the first are fetched concurrently.
 
-    For whole-history scans (the full invoice archive is ~60 pages: ~50s in sequence, ~6s
-    in parallel). FIC limits requests per hour, not concurrent ones; the request count
-    is the same."""
+    For whole-history scans (the invoice archive is ~60 pages, ~50 s in sequence). Same number
+    of requests; concurrency kept low so bursts don't upset the firewall in front of the API."""
     def page(n):
-        return list_fn(company_id=fic.COMPANY_ID, per_page=PAGE_SIZE, page=n, **kwargs)
+        return api_call(list_fn, company_id=fic.COMPANY_ID, per_page=PAGE_SIZE, page=n, **kwargs)
     first = page(1)
     docs = [d.to_dict() for d in (first.data or [])]
     with ThreadPoolExecutor(workers) as pool:

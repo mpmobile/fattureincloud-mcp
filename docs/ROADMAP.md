@@ -19,6 +19,8 @@ Planned work that is not scheduled yet.
 
 ## Code
 
+- **Work around the API firewall on `q` filters.** An AWS load balancer in front of the FIC API answers `403` (HTML body, `Server: awselb`) to some filter shapes it takes for SQL injection, deterministically and regardless of traffic. Observed: `date >= '2026-01-01' and next_due_date != null` and `date >= '2026-01-01' or next_due_date != null` are blocked; `next_due_date != null and date >= '2026-01-01'`, `date >= '2026-01-01' and date <= '2026-12-31' and next_due_date != null` and the parenthesised `or` pass; parentheses help in some cases and not in others. All queries the tools build today were checked and pass, but new filter combinations in `list_invoices` could hit it. Options: on a firewall 403, retry once with the clauses reordered, then fall back to fetching without the offending clause and filtering locally. `listing.is_firewall_block` already tells these apart from permission errors.
+
 - **Don't cache failed cost / revenue center lookups.** `fetch_cost_centers` and `fetch_revenue_centers` return `[]` when the API call fails, and the cache decorator stores that `[]` for 24 hours. After a transient error (network, 5xx) `list_cost_centers` reports no centers and every `revenue_center` / `cost_center` is rejected as unknown for a day. Errors should skip the cache (and surface), only real answers should be stored.
 
 - **Split `tools/issued_documents.py` if it keeps growing** (about 550 lines today), e.g. reading/editing vs creation.

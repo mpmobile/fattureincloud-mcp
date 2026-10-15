@@ -12,16 +12,20 @@ from pydantic import Field
 
 from .. import cache, fic
 from ..app import ann, tool
+from .. import listing
 from ..listing import (ISSUED_LIST_FIELDS, doc_taxable, fetch_all_pages, fetch_all_pages_parallel, get_total_from_doc,
-                       parse_date, payment_status_name, today_str)
+                       is_firewall_block, parse_date, payment_status_name, today_str)
 
 CACHE_TTL_SECONDS = 300  # the dashboard calls the tool every time it opens
 HISTORY_TTL = timedelta(hours=24)
+CLIENT_NAMES_TTL = timedelta(hours=24)
+QUOTA_WARNING = {"hourly": 100, "monthly": 2000}  # remaining requests below which the output warns
 SAFETY_CAP = 20000       # documents per query; reaching it means totals may be partial
 AGING_BUCKETS = (("1_30", 30), ("31_90", 90), ("91_365", 365), ("oltre_365", None))
 NO_REGISTRY_PREFIX = "nome:"
 
-_cache = {}
+_cache = {}       # full results, per parameter combination
+_doc_cache = {}   # fetched documents, shared by every presentation option (amounts, proformas, top_n)
 
 
 def _empty_aging():
@@ -53,6 +57,9 @@ def _client_key(d):
 
 def _api_error_message(e):
     status = getattr(e, "status", None)
+    if is_firewall_block(e):
+        return ("Richiesta bloccata dal firewall davanti all'API FattureInCloud (403 AWS), non un problema di "
+                "permessi del token: alcune combinazioni di filtri vengono scambiate per attacchi.")
     messages = {
         401: "Token FattureInCloud non valido, scaduto o revocato: rigenerarlo e aggiornare FIC_ACCESS_TOKEN.",
         403: "Il token FattureInCloud non ha i permessi necessari (servono issued_documents ed entity.clients in lettura).",
@@ -102,6 +109,55 @@ class _Exposure:
         }
 
 
+def _client_names():
+    """id -> trimmed registry name. ~6 requests for a few hundred clients, so cached on disk for
+    24 hours; a client added meanwhile still gets its name from the documents."""
+    hit = cache.get("client_names", fic.COMPANY_ID, ttl=CLIENT_NAMES_TTL)
+    if hit is not None:
+        return hit
+    rows, _ = fetch_all_pages(fic.clients_api.list_clients, max_results=None, fields="id,name")
+    names = {str(c["id"]): (c.get("name") or "").strip() for c in rows}
+    cache.put("client_names", fic.COMPANY_ID, names)
+    return names
+
+
+def _documents(year, as_of, open_from):
+    """Documents fetched fresh from FIC, cached 5 minutes per (year, as_of, open_from) only, so
+    switching amounts, proformas or top_n costs no request. Always with item lines (net amounts)."""
+    key = (year, as_of, open_from)
+    hit = _doc_cache.get(key)
+    if hit and time.monotonic() - hit[0] < CACHE_TTL_SECONDS:
+        return hit[1]
+    fields = ISSUED_LIST_FIELDS + ",items_list"
+    year_q = f"date >= '{year}-01-01' and date <= '{year}-12-31'"
+    open_q = "next_due_date != null" + (f" and date >= '{open_from}'" if open_from else "")
+    pf_q = f"date <= '{as_of}'" + (f" and date >= '{open_from}'" if open_from else "")
+    docs, warnings = {}, []
+    for name, label, doc_type, q in (("year_invoices", f"fatture {year}", "invoice", year_q),
+                                     ("open_invoices", "fatture aperte", "invoice", open_q),
+                                     ("year_credit_notes", f"note di credito {year}", "credit_note", year_q),
+                                     ("open_credit_notes", "note di credito aperte", "credit_note", open_q),
+                                     ("proformas", "proforma maturate", "proforma", pf_q)):
+        rows, total = fetch_all_pages(fic.issued_api.list_issued_documents, max_results=SAFETY_CAP,
+                                      type=doc_type, q=q, fields=fields)
+        if len(rows) < total:
+            warnings.append(f"{label}: letti {len(rows)} documenti su {total}, totali parziali")
+        docs[name] = rows
+    docs["warnings"] = warnings
+    _doc_cache[key] = (time.monotonic(), docs)
+    return docs
+
+
+def _quota_warnings():
+    out = []
+    for period, label in (("hourly", "orarie"), ("monthly", "mensili")):
+        remaining = listing.quota.get(f"ratelimit-{period}remaining")
+        if remaining is not None and int(remaining) < QUOTA_WARNING[period]:
+            out.append(f"Quota API FattureInCloud quasi esaurita: restano {remaining} richieste {label} "
+                       f"su {listing.quota.get(f'ratelimit-{period}limit')}")
+    return out
+
+
 def _history_index():
     """Per-client facts that need the whole invoice archive (~60 pages): last invoice date,
     last payment date, and every paid installment (for cash collected in a given year).
@@ -145,27 +201,14 @@ def _compute(year, as_of, open_from, top_n, include_pf, amounts):
         gross = get_total_from_doc(d)
         return doc_taxable(d) / gross if gross else 1.0
 
-    # --- Fetch: fresh targeted queries + the cached history index ------------------------
-    fields = ISSUED_LIST_FIELDS + (",items_list" if amounts == "net" else "")
-    year_q = f"date >= '{year_start}' and date <= '{year_end}'"
-    open_q = "next_due_date != null" + (f" and date >= '{open_from}'" if open_from else "")
-    pf_q = f"date <= '{as_of}'" + (f" and date >= '{open_from}'" if open_from else "")
-
-    def fetch(label, doc_type, q):
-        docs, total = fetch_all_pages(fic.issued_api.list_issued_documents, max_results=SAFETY_CAP,
-                                      type=doc_type, q=q, fields=fields)
-        if len(docs) < total:
-            warnings.append(f"{label}: letti {len(docs)} documenti su {total}, totali parziali")
-        return docs
-
-    year_invoices = fetch(f"fatture {year}", "invoice", year_q)
-    open_invoices = fetch("fatture aperte", "invoice", open_q)
-    year_credit_notes = fetch(f"note di credito {year}", "credit_note", year_q)
-    open_credit_notes = fetch("note di credito aperte", "credit_note", open_q)
-    proformas = fetch("proforma maturate", "proforma", pf_q)
+    # --- Fetch: documents (5-minute cache), history index and client names (24-hour cache) --
+    docs = _documents(year, as_of, open_from)
+    warnings.extend(docs["warnings"])
+    year_invoices, open_invoices = docs["year_invoices"], docs["open_invoices"]
+    year_credit_notes, open_credit_notes = docs["year_credit_notes"], docs["open_credit_notes"]
+    proformas = docs["proformas"]
     history = _history_index()
-    registry = {str(c["id"]): (c.get("name") or "").strip()
-                for c in fetch_all_pages(fic.clients_api.list_clients, max_results=None, fields="id,name")[0]}
+    registry = _client_names()
     seen_names = {}
     unlinked = {}
 
@@ -361,7 +404,8 @@ def _compute(year, as_of, open_from, top_n, include_pf, amounts):
             "columns": columns,
             "rows": [[key, y] + [r2(v[c]) for c in columns[2:]] for (key, y), v in year_rows],
         },
-        "warnings": warnings,
+        "warnings": warnings + _quota_warnings(),
+        "api_quota": {k.removeprefix("ratelimit-"): int(v) for k, v in listing.quota.items()},
     }
 
 
