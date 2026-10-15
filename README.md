@@ -7,11 +7,23 @@
 
 <!-- mcp-name: io.github.aringad/fattureincloud-mcp -->
 
-by **[Mediaform s.c.r.l.](https://media-form.it)** — Genova, Italy
+Originally created by **[Mediaform s.c.r.l.](https://media-form.it)** (Genova, Italy). **This fork is maintained by Makeitapp SRL.**
 
 MCP server that connects Claude (Desktop, Code, or any MCP client) to **FattureInCloud**, the leading Italian SaaS for electronic invoicing. Manage invoices, credit notes, proformas, clients, suppliers, cost/revenue centers, and supplier expenses through natural language. Italy mandates B2B/B2C e-invoicing through the Sistema di Interscambio (SDI) — this server brings AI-assisted billing to that compliance-driven workflow.
 
 > ⚠️ **Unofficial integration.** Not affiliated with, endorsed by, or sponsored by TeamSystem S.p.A., owner of the FattureInCloud trademark. The trademark is used here for descriptive purposes only.
+
+## About this fork
+
+This repository is a fork of [aringad/fattureincloud-mcp](https://github.com/aringad/fattureincloud-mcp), maintained independently by Makeitapp SRL. It is not supported by Mediaform: for issues with this version use [this repository's issues](https://github.com/mpmobile/fattureincloud-mcp/issues).
+
+Compared with the original project:
+
+- **Refactored code**: the single `server.py` became the `fattureincloud_mcp` package, one module per domain, with tools declared through FastMCP (input schemas generated from type hints and Pydantic models). `server.py` remains as an entry point, so existing configurations keep working.
+- **Fixes**: listings no longer stop at 100 results (pagination); `get_situation` reported 0 collected and mixed gross revenue with net costs; received documents showed no number and no gross amount; `mcp` is pinned to 1.x, since a fresh install picked up the incompatible 2.x and did not start.
+- **New tools**: `get_client_situation`, `get_situazione_crediti` (receivables dashboard), `list_payment_accounts`, `register_payment`; new filters on `list_invoices` (client, dates, payment status).
+
+The PyPI package and the MCPB bundle linked below (options 1 and 2) are the **original Mediaform releases** and don't include these changes: to use this fork, install from source ([option 3](#option-3--from-the-source-code-without-git-windows--macos)). Planned work is listed in [`docs/ROADMAP.md`](docs/ROADMAP.md).
 
 ## Features (27 tools)
 
@@ -48,7 +60,9 @@ MCP server that connects Claude (Desktop, Code, or any MCP client) to **FattureI
 
 ## Installation
 
-### Option 1 — Claude Desktop (MCPB bundle, recommended)
+### Option 1 — Claude Desktop (MCPB bundle of the original project)
+
+> Installs the original Mediaform release, without this fork's changes.
 
 1. Download the latest `fattureincloud.mcpb` from the [GitHub Releases page](https://github.com/aringad/fattureincloud-mcp/releases/latest).
 2. Drag the `.mcpb` file onto Claude Desktop, or use **Settings → Extensions → Install from file**.
@@ -56,7 +70,9 @@ MCP server that connects Claude (Desktop, Code, or any MCP client) to **FattureI
 
 That's it — no Python setup, no virtualenv.
 
-### Option 2 — Manual install via PyPI
+### Option 2 — Manual install via PyPI (original project)
+
+> Installs the original Mediaform release, without this fork's changes.
 
 For Claude Code users or any MCP client that reads `claude_desktop_config.json`-style configuration:
 
@@ -86,7 +102,7 @@ Restart your MCP client after editing the config.
 
 ### Option 3 — From the source code, without git (Windows / macOS)
 
-Use this if you want the latest code from this repository and don't use git. You need Python 3.10 or newer, Claude Desktop, and your FattureInCloud credentials ([how to get them](#getting-the-fattureincloud-credentials)).
+This is the way to install **this fork**; you don't need git. You need Python 3.10 or newer, Claude Desktop, and your FattureInCloud credentials ([how to get them](#getting-the-fattureincloud-credentials)).
 
 #### Windows
 
@@ -278,19 +294,19 @@ The label must already exist; centers are managed from FattureInCloud's web UI (
 
 ## Privacy & Data Handling
 
-- API calls go **directly** from your machine to FattureInCloud's servers (`api-v2.fattureincloud.it`). No data is routed through Mediaform or any third-party server.
+- API calls go **directly** from your machine to FattureInCloud's servers (`api-v2.fattureincloud.it`). No data is routed through the maintainers or any third-party server.
 - The local cache is plaintext JSON in your home directory. You control it.
 - Credentials live only in your `.env` (gitignored), shell, or MCP client `user_config`. They are never logged or transmitted to anyone other than FattureInCloud.
-- Full Privacy Policy: **https://media-form.it/privacy-policy.html**
+- Privacy Policy of the original project: **https://media-form.it/privacy-policy.html**
 - See also [`docs/PRIVACY.md`](docs/PRIVACY.md) for a mirrored copy of the policy.
 
 ## Known issues
 
-- **Invoice duplication may fail for some clients.** A specific client configuration triggers a failure path that hasn't been reproduced yet. Workaround: duplicate manually from the FattureInCloud web panel. Tracked in [`docs/KNOWN_ISSUES.md`](docs/KNOWN_ISSUES.md) — please report a reproducible case via [GitHub issues](https://github.com/aringad/fattureincloud-mcp/issues).
+- **Invoice duplication may fail for some clients.** A specific client configuration triggers a failure path that hasn't been reproduced yet. Workaround: duplicate manually from the FattureInCloud web panel. Tracked in [`docs/KNOWN_ISSUES.md`](docs/KNOWN_ISSUES.md) — please report a reproducible case via [GitHub issues](https://github.com/mpmobile/fattureincloud-mcp/issues).
 
 ## Contributing
 
-Issues and pull requests welcome at https://github.com/aringad/fattureincloud-mcp.
+Issues and pull requests for this fork are welcome at https://github.com/mpmobile/fattureincloud-mcp. Changes that also apply to the original project can be proposed upstream at https://github.com/aringad/fattureincloud-mcp.
 
 For any code change:
 
@@ -314,6 +330,6 @@ MIT — see [`LICENSE`](LICENSE).
 
 ## Author / Support
 
-- Maintainer: **[Mediaform s.c.r.l.](https://media-form.it)** — Genova, Italy
-- Issues: https://github.com/aringad/fattureincloud-mcp/issues
-- Email: assistenza@mediaform.it
+- Original author: **[Mediaform s.c.r.l.](https://media-form.it)** — Genova, Italy ([original repository](https://github.com/aringad/fattureincloud-mcp))
+- This fork: maintained by **Makeitapp SRL**
+- Issues for this fork: https://github.com/mpmobile/fattureincloud-mcp/issues
